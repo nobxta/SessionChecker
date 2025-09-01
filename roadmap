@@ -1,0 +1,133 @@
+# Telegram Session Management SaaS – Developer Project Specification
+
+## 1. Overview
+
+Build a **serverless, stateless web application** that allows users to upload and operate on Telegram `.session` files, providing real-time progress updates in the browser for all tasks. The service supports in-memory ZIP handling, session validation, SpamBot health checks, mass profile edits, code extraction, and live feedback via WebSocket.
+
+---
+## 2. Technology Stack
+
+- **Backend:** FastAPI (Async REST + WebSocket)
+- **Frontend:** Flask (HTML/Jinja templating), Vanilla JS (upload logic, WebSocket client)
+- **Telegram Integration:** Telethon, all in memory (never writes to disk)
+- **Environment:** `.env` with `API_PAIRS_JSON` – an array of `{api_id, api_hash}` for session authentication (random or round-robin assignment)
+- **Hosting:** Serverless (Vercel / similar), where no file persists to local storage
+
+---
+## 3. Architecture & Folder Structure
+
+```
+session_manager/
+│
+├── backend/
+│   ├── main.py                # FastAPI app, router mounting, WS support
+│   ├── routers/
+│   │   ├── zip_handler.py     # POST /zip/preview – in-memory ZIP session list
+│   │   ├── validator.py       # POST /validate, WS task=validate – session checker
+│   │   ├── health.py          # POST /health, WS task=health – SpamBot health
+│   │   ├── name.py            # POST /name/set, WS task=name – mass profile naming
+│   │   ├── bio.py             # POST /bio/set, WS task=bio – set profile bio
+│   │   ├── pfp.py             # POST /pfp/set, WS task=pfp – set profile pic
+│   │   ├── login_code.py      # POST /login_code, WS task=login – extract codes
+│   │   ├── auth_code.py       # POST /auth_code, WS task=auth – my.telegram.org
+│   │   └── stream.py          # WebSocket /ws/stream – push live log
+│   ├── utils/
+│   │   ├── file_utils.py      # In-memory ZIP extraction
+│   │   ├── session_utils.py   # Telethon helpers, API rotation
+│   │   └── logger.py          # Stream logs → WebSocket
+│   ├── api_pool.py            # Loads credentials from .env
+│   ├── .env                   # API_PAIRS_JSON env var
+│   └── requirements.txt
+│
+└── frontend/
+    ├── app.py                 # Flask routing/templates
+    ├── templates/
+    │   ├── index.html         # Task cards (choose action)
+    │   ├── upload.html        # Drag-drop/file-picker
+    │   ├── preview.html       # Checkbox list of sessions
+    │   ├── input_form.html    # Name/bio input fields
+    │   ├── terminal.html      # Live log console
+    │   └── result.html        # Tabulate final results
+    └── static/
+        ├── css/               # UI styles
+        └── js/                # Upload logic, WS handlers
+```
+
+---
+## 4. Feature Matrix & Endpoints
+
+| Feature             | HTTP Endpoint         | WebSocket Stream            | Description                                             |
+|---------------------|----------------------|-----------------------------|---------------------------------------------------------|
+| ZIP Preview         | POST /zip/preview    | —                           | Unpack zip file in memory, list `.session` filenames    |
+| Validate Sessions   | POST /validate       | /ws/stream?task=validate    | Check login on each session                             |
+| Health Check        | POST /health         | /ws/stream?task=health      | Use @SpamBot to detect limitations                      |
+| Set Names           | POST /name/set       | /ws/stream?task=name        | Set display name on each session                        |
+| Set Bio             | POST /bio/set        | /ws/stream?task=bio         | Mass set bio for each account                           |
+| Set Profile Picture | POST /pfp/set        | /ws/stream?task=pfp         | Mass set same profile pic                               |
+| Extract Login Code  | POST /login_code     | /ws/stream?task=login       | Find active login codes in message history              |
+| Extract Auth Code   | POST /auth_code      | /ws/stream?task=auth        | Get web login code from my.telegram.org messages        |
+
+---
+## 5. Detailed User Journey & Data Flow
+
+1. **Homepage (index.html):** Shows 7 cards, each representing a task (validate, health, naming, etc.).
+2. **Upload (upload.html):** For selected task, user can drag-drop or select .session files or a ZIP containing them.
+3. **ZIP Preview:** Files sent to POST /zip/preview; backend returns session file names; user picks which to process.
+4. **Parameter Input (input_form.html):** Where needed (names, bio, PFP), user edits values per session.
+5. **Start Task:** User launches task; frontend opens a WebSocket to `/ws/stream?task=`.
+6. **Real-Time Progress (terminal.html):** Backend streams per-session updates (✅, ❌, user IDs, phone, codes) as they occur.
+7. **Result Summary (result.html):** Final JSON summary fetched via REST, shown as a table (session, status, user ID, etc.).
+8. **Return Home:** Link resets the workflow.
+
+---
+## 6. Implementation Highlights
+
+- **True Statelessness:** Everything lives in memory (BytesIO), no disk I/O anywhere – fully compatible with serverless hosts.
+- **API Credential Rotation:** Backend pulls API pairs from .env, randomly or round-robin assigns for each Telethon client.
+- **WebSocket Logging:** Every session step sends a live log to the browser.
+- **Task Fault Isolation:** One bad session never crashes the batch; each task logs its own errors gracefully.
+- **Easy Extensibility:** New tasks (routes, WebSocket events) follow the same REST + WS pattern.
+- **Frontend:** All logic (uploads, forms, logs) is pure JS + templated HTML; no SPA framework necessary.
+
+---
+## 7. Developer Notes
+
+- **All TelegramClient objects must be instantiated from BytesIO streams.** Never touch local disk.
+- **WebSocket streaming progress is mandatory for all batch operations.** Frontend should show logs live as they arrive.
+- **Output summary for each task must be fetchable via REST** for the UI’s final table. Always provide per-session result objects (`{"session":…, "status":…, "user_id":…, "phone":…}` etc.).
+- **Live error/exception reporting:** If session is frozen, banned, or FloodWait, emit a clear status (do not halt others).
+- **Front and back must stay loosely coupled:** Frontend never manipulates raw Telethon objects; only handles sessions as files/blobs.
+
+## 8. Quick Reference – How Each File Works
+
+- **main.py:** Bootstraps FastAPI, loads routers, handles WS.
+- **zip_handler.py:** Receives ZIP and extracts `.session` names in memory.
+- **validator.py:** Validates session by connecting & checking auth.
+- **health.py:** Sends `/start` to @SpamBot to detect account state.
+- **name.py, bio.py, pfp.py:** Receive POST data, apply changes via Telethon Client.
+- **login_code.py, auth_code.py:** Regular expressions find login code tokens in messages.
+- **stream.py:** Channels log messages out to users in real-time via WS.
+- **session_utils.py:** Builds in-memory clients; central for all Telethon work; rotates APIs.
+- **logger.py:** Sends logs to WS.
+- **api_pool.py:** Reads and manages API credential assignment.
+
+## 9. UX/UI Highlights
+
+- Animated card selection on homepage, drag/drop uploads, live scrollable terminal console (), status badges, copy-to-clipboard buttons for codes.
+- For [Set Name]: Offers AI (or random) name generator, with editing allowed before submission.
+- Always returns to homepage at flow’s end.
+
+## 10. Deployment Note
+
+- Target Vercel (or similar). All FastAPI/Flask endpoints serverless-ready, stateless (memory-only) logic.
+- No persistent file system assumed.
+
+**Ready to begin? Choose your starting point:**
+
+- **Backend scaffold:** Generate the whole backend folder & FastAPI endpoint stubs
+- **Frontend templates:** Jinja/flask templates for all views & live terminal
+- **End-to-end skeleton:** Minimal working demo for stateless file handling
+- **Sample code for any endpoint/module:** (specify which one)
+- **Deployment config:** (Vercel-specific tips/scripts)
+
+**Tell me your next step, and I’ll give you code or detailed instructions!**

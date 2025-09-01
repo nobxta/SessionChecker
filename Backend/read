@@ -1,0 +1,105 @@
+## Telegram Session Management SaaS – Backend System Explanation
+
+### 1. Purpose & Core Functionality
+
+The **backend** is the engine of the Telegram Session Management SaaS platform. Built entirely on FastAPI (Python), it’s designed to:
+- Accept user uploads of Telegram `.session` files (directly or inside ZIPs)
+- Host a suite of REST endpoints for session validation, profile updates, health checks, and data extraction
+- Handle all session logic purely in memory (no file system usage)
+- Deliver **real-time progress** and structured results back to users via WebSocket and REST—fully stateless and serverless (ideal for deployment on Vercel or similar)
+
+### 2. Folder Structure & Responsibilities
+
+```
+backend/
+├── main.py                # Bootstraps FastAPI app, loads all routers, sets up WebSocket
+├── routers/               # Each .py = an action/task endpoint & related business logic
+│   ├── zip_handler.py     # /zip/preview (POST): In-memory ZIP extraction
+│   ├── validator.py       # /validate (POST): Session file validity check
+│   ├── health.py          # /health (POST): @SpamBot status parsing
+│   ├── name.py            # /name/set (POST): Update profile names
+│   ├── bio.py             # /bio/set (POST): Set bios in batch
+│   ├── pfp.py             # /pfp/set (POST): Mass-upload profile picture
+│   ├── login_code.py      # /login_code (POST): Scrape Telegram login codes
+│   ├── auth_code.py       # /auth_code (POST): Extract my.telegram.org web login code
+│   └── stream.py          # /ws/stream (WebSocket): Pushes real-time logs for tasks
+├── utils/                 # Shared internal modules
+│   ├── file_utils.py      # ZIP reading/extraction using BytesIO only
+│   ├── session_utils.py   # Telethon: setup client from byte stream, API rotation, core actions
+│   └── logger.py          # Pipes status lines to WebSocket clients in real time
+├── api_pool.py            # Loads, rotates API ID/HASH pairs from .env into memory
+├── .env                   # API_PAIRS_JSON: Holds list of {api_id, api_hash} objects
+└── requirements.txt       # All Python dependencies (FastAPI, Telethon, etc.)
+```
+
+### 3. How the Backend Works
+
+#### A. Stateless Session Handling
+- All file uploads (ZIPs or session files) are read into memory via BytesIO objects—**never written to disk**.
+- On each API request, the backend parses the file payload, processes it in memory, and discards after the task (supporting Vercel/serverless restrictions).
+
+#### B. API Credential Pool
+- `api_pool.py` loads a JSON array from `.env` into memory.
+- For every session operation, it rotates through credentials (randomly or round-robin) to avoid Telegram rate limits/flood errors.
+
+#### C. Router Modules & Tasks
+Each major operation is isolated in its own router:
+- **zip_handler.py:** Decompresses and lists .session files (filename only, no disk writes)
+- **validator.py:** Connects (via Telethon) to each session; checks login/auth status; emits per-session status
+- **health.py:** Chats with @SpamBot to detect if accounts are “good,” “limited,” “frozen,” or “broken”
+- **name.py, bio.py, pfp.py:** Mass update profile info using the Telegram API; each session is attempted independently
+- **login_code.py, auth_code.py:** Message history scanning per session: harvests login/auth codes with regex/search
+- **stream.py:** For long-running/batch operations, opens WebSocket and sends progress logs line-by-line as soon as each action is done.
+
+#### D. Utilities
+- **file_utils.py:** Handles in-memory ZIP → session extraction
+- **session_utils.py:** Centralized creation of async TelegramClient objects directly from BytesIO, handling proper API credential assignment
+- **logger.py:** Forwards logs and error/status messages from each step straight to WebSocket for live UI display
+
+### 4. Endpoint Inputs and Outputs
+
+| Endpoint                  | Input                                | Output (REST/WS)                                 |
+|---------------------------|--------------------------------------|--------------------------------------------------|
+| `/zip/preview` (POST)     | ZIP file (FormData)                  | List of session filenames (JSON)                 |
+| `/validate` (POST)        | List of session files                | Per-session valid/broken status                  |
+| `/health` (POST)          | List of session files                | Per-session spam status, user ID, phone          |
+| `/name/set` (POST)        | Session files, list of names         | Success/error per account, user ID, phone        |
+| `/bio/set` (POST)         | Sessions, one bio string             | Success/error for each session                   |
+| `/pfp/set` (POST)         | Sessions, one image                  | Success/error for each session                   |
+| `/login_code` (POST)      | Sessions                             | Login code extracted for each session            |
+| `/auth_code` (POST)       | Sessions                             | Web login code for each session                  |
+| `/ws/stream` (WebSocket)  | Query: task name; body: input files  | Plain text status updates sent as they happen    |
+
+All endpoints process each session INDEPENDENTLY. If one session has a FloodWait, crash, or is frozen, it logs the issue and continues the batch without stopping other operations.
+
+### 5. In-Memory, Serverless Design
+
+- No file or session physically touches the backend disk—inputs/outputs are always in-memory buffers.
+- The backend is deployable as serverless Python functions—there’s no dependency on persistent storage, enabling instant scale-up and avoiding platform limitations.
+
+### 6. Backend Data Flow Example
+
+**User:** Uploads ZIP with 5 sessions to `/zip/preview`  
+**Backend:**  
+- BytesIO ZIP → unpack → returns `{"sessions": ["a.session", "b.session", ...]}`
+
+**User:** Selects sessions, submits names via `/name/set`  
+**Backend:**  
+- Receives sessions and names as bytes and JSON
+- For each: creates a Telethon client from BytesIO, assigns random API credentials, applies UpdateProfileRequest, disconnects on finish
+- Sends progress logs to frontend via `/ws/stream?task=name`
+- When complete, exposes summary JSON per session (`session, status, user_id, phone`)
+
+### 7. Error Handling & Extensibility
+
+- Every operation is wrapped in try/except; failures (FloodWaits, expired sessions, inbox bans) are reported instantly, never blocking the batch.
+- To add a new task (e.g., email update or phone change), simply create a new router module, add a corresponding REST/WS endpoint, and follow the same data flow.
+
+### 8. Recap: Backend at a Glance
+
+- **Purely stateless, entirely memory-based**, serverless-friendly backend using FastAPI and Telethon.
+- Real-time feedback for every user task via WebSocket.
+- Modular: each kind of job (validate, bio, login code, etc.) = 1 router file = 1 job in code.
+- End-to-end, everything a Telegram integration needs—**no external dependencies except Python, FastAPI, and Telethon.** 
+
+This backend design enables secure, transparent, and instant Telegram session management for users, perfectly tailored for modern serverless platforms.
